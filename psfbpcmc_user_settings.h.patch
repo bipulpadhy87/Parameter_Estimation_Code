@@ -1,0 +1,121 @@
+--- original/psfbpcmc_user_settings.h
++++ revised/psfbpcmc_user_settings.h
+@@ -28,7 +28,7 @@
+  *   1. WPT experiment settings
+  *      Sampling rate, commanded bridge voltage, compensation capacitors,
+  *      winding resistance estimates, automatic frequency transition, and
+- *      the search limits used by the online L/M/load estimator.
++ *      the limits and acceptance checks of the online complex-load estimator.
+  *
+  *   2. Hardware mappings inherited from the TI PSFB reference project
+  *      CPU timers, ADC inputs, PWM modules/GPIO pins, comparators, and SFRA
+@@ -142,8 +142,8 @@
+ //   y[n] = B0*x[n] + B1*x[n-1] + B2*x[n-2]
+ //                    - A1*y[n-1] - A2*y[n-2].
+ //
+-// They are retained for the TI closed-loop PSFB build. The WPT harmonic and
+-// inductance estimator is fixed-point and does not use these float coefficients.
++// They are retained for the TI closed-loop PSFB build. The WPT harmonic extractor is fixed-point; its new slow parameter
++// solver uses long double. Neither uses these legacy controller coefficients.
+ //
+ #define PSFB_GV_DF22_B0    (float32_t) 14.0313626*1.6
+ #define PSFB_GV_DF22_B1    (float32_t) -25.2978386*1.6
+@@ -250,17 +250,16 @@
+ // COUNTER ZERO: v(t)=Vr*cos(theta)-Vi*sin(theta). Overrides survive reset.
+ // Update them if bus voltage, frequency, phase, dead time or load changes.
+ 
+-// PASSIVE RECTIFIER HARMONIC MODEL
+-// 1: Req is used only at the fundamental. For approximately sinusoidal
+-// secondary current I2,1=|I2,1| exp(j*phi2) and almost constant DC voltage:
+-//   Vrect,3 = -(Req*|I2,1|/3) exp(j*3*phi2).
+-// Use this voltage source at 3*f, NOT a resistor Req. Third-harmonic data
+-// still affect the L/M/load fit. Conduction gaps, secondary distortion,
+-// diode drops and output ripple are outside this approximation.
+-// 0: a truly linear AC resistance at every harmonic (resistor-only test,
+-// NOT a diode bridge). In mode 0 the DC conversion is only a convention.
+-#define WPT_IDENT_RECTIFIER_HARMONIC_MODEL         1U
+-
++// COMPLEX-RECEIVER IDENTIFICATION (no rectifier-type switch)
++// The solver fits separate receiver ratios Zrec1=R1+jX1 and Zrec3=R3+jX3.
++// Each ratio is held approximately constant across the TWO operating points,
++// not across harmonics. This allows reactance and negative third resistance.
++// It assumes Lp=Ls and forward receiving operation. It is NOT valid for
++// arbitrary receiver control/load changes between captures. No DC quantities
++// are estimated, and no passive-bridge harmonic-voltage formula is imposed.
++// All four measured impedances remain mandatory. A missing third harmonic
++// produces WPTCE_MISSING_THIRD rather than an undocumented fallback.
++//
+ // SERIES COMPENSATION CAPACITORS
+ //
+ // The capacitor reactance used by the model is
+@@ -311,7 +310,7 @@
+ #define WPT_IDENT_AVERAGE_CAPTURE_COUNT              3U
+ #define WPT_IDENT_MIN_FUNDAMENTAL_CURRENT_MA         50L
+ 
+-// The third harmonic is now part of the L/M/load fit, not just a diagnostic.
++// The third harmonic participates through its OWN fitted complex load.
+ // Reject it below this peak amplitude because division by a very small third-
+ // harmonic current produces an unusably noisy impedance estimate.
+ #define WPT_IDENT_MIN_THIRD_CURRENT_MA               25L
+@@ -340,30 +339,39 @@
+ #define WPT_PWM_TRANSITION_PRE_BLANK_US               20UL
+ #define WPT_PWM_TRANSITION_POST_BLANK_US            1000UL
+ 
+-// COMMON SELF-INDUCTANCE SEARCH LIMITS
+-//
+-// The model assumes Lprimary = Lsecondary = L. A coarse-to-fine integer grid
+-// search covers these limits. More steps/passes improve resolution but take
+-// more CPU time after the second frequency measurement. Defaults cover
+-// 1-500 uH (1 uH = 1000 nH).
++// COMMON SELF-INDUCTANCE LIMITS
++// Lp=Ls=L is retained. Set these from actual coil bounds, not fitted data.
++// The old integer-grid-only solver has been replaced by the commented
++// wpt_complex_estimator.h numerical core. Public output units remain integer.
+ #define WPT_IDENT_MIN_SELF_INDUCTANCE_NH          1000UL
+ #define WPT_IDENT_MAX_SELF_INDUCTANCE_NH        500000UL
+-#define WPT_IDENT_L_SEARCH_STEPS                    128U
+-#define WPT_IDENT_L_SEARCH_PASSES                     4U
+-
+-// MODEL-FIT QUALITY LIMIT
+-//
+-// The solver predicts R and X for four observations: fundamental and third
+-// harmonic at each of two operating frequencies. The residual is
+-//
+-//   residual = sqrt(sum((Rmeas-Rmodel)^2 + (Xmeas-Xmodel)^2) / 8).
+-//
+-// Maximum RMS input-impedance mismatch across both harmonics/frequencies.
+-// Mode 1 includes the rectifier harmonic voltage source at 3*f.
+-// identificationValid means the NUMERICAL residual passed, not physical
+-// accuracy. identificationModelWarning stays set when a modeled primary
+-// voltage or the approximate passive rectifier model is used.
+-#define WPT_IDENT_MAX_IMPEDANCE_RESIDUAL_MOHM      5000UL
++
++// Receiver component bounds (applied separately to R1,X1,R3,X3).
++// Fundamental R1>=0; R3 may be negative because harmonics exchange power.
++#define WPT_IDENT_MAX_RECEIVER_COMPONENT_MOHM   10000000L
++
++// IMPEDANCE UNCERTAINTY / ACCEPTANCE SETTINGS
++// Initial engineering allowances, NOT verified sensor statistics. Calibrate.
++// sigmaZ = floor + relative*|Z| + sqrt(sigmaV^2+|Z|^2*sigmaI^2)/|I|.
++// Larger sigma reduces weighting and INCREASES the sensitivity diagnostic.
++// Do not loosen these simply to force a valid result. The estimator rejects
++// excessive residual, weak local sensitivity, detected ambiguity and bounds.
++#define WPT_IDENT_IMPEDANCE_NOISE_FLOOR_MOHM           20L
++#define WPT_IDENT_IMPEDANCE_RELATIVE_NOISE_PERMILLE     2L
++#define WPT_IDENT_VOLTAGE_PHASOR_NOISE_MV               1L
++#define WPT_IDENT_CURRENT_PHASOR_NOISE_MA               1L
++#define WPT_IDENT_MAX_NORMALIZED_RMS_PERMILLE       3000UL
++#define WPT_IDENT_MAX_RELATIVE_SENSITIVITY_PERMILLE   200UL
++#define WPT_IDENT_AMBIGUITY_DELTA_COST                  4L
++// Retained additional absolute RMS ceiling, in milliohms.
++#define WPT_IDENT_MAX_IMPEDANCE_RESIDUAL_MOHM        5000UL
++
++// ModelWarning stays one after every solve: equal L and frequency-invariant
++// receiver ratios remain assumptions, even when measured primary V is used.
++// identificationValid means all IMPLEMENTED numerical checks passed, NOT a
++// proof of uniqueness, calibration, model correctness or safe power operation.
++// The slow solver uses C28x 64-bit long double and runs outside the ISR.
++// Allow 64-bit floating operations in CCS; profile execution and memory there.
+ 
+ //
+ // INPUT/OUTPUT CROSSBAR RESET VALUE

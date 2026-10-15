@@ -1,0 +1,18 @@
+{
+  "psfbpcmc_main.c": "92d60c914156f668f0cc96799f20539db6a36c74f79500034cb5a84b25c48ec7",
+  "wpt_complex_estimator.h": "3f03e67c8f6e06bab7cda48fe64d9e5d30715343f97d6fe3c6b4cb5c55814e9d",
+  "README.md": "04d58fe3b8a6a8073bf28be32773bf179de4545fe6500e3c8c16cac1f17c84a2",
+  "psfbpcmc_user_settings.h.patch": "d48cb9e3f0811f21c3f0dcee66f798f210e3896bd807c08524cd6850d5ca0513",
+  "psfbpcmc_user_settings.h": "099cb0c8bb9aa9b57dbe500d6a8a0d29841bc1b79ec13e5588c6f996bf9021af",
+  "psfbpcmc_main.c.patch": "ea8c19255ecc68b52d21ba31b1f973a172a6a35dab456eac0dbc484752cbefdf",
+  "reference/parameterestimation_original.m": "13e5db91338f61861e2d88ad4af2b4da091c19e9862ec81ce3749d2786ee7f6b",
+  "tests/extended_results.json": "664e756bd97cd200ec35a46f2926d1051c9de6173ec818f73adb798a306eced1",
+  "tests/test_preservation.py": "3f01981569ca7ba87360fa94255e583585bf998ed4e079494382a2da761bcb6a",
+  "tests/test_estimator.py": "853538272435a3e466338843aaea8d7df53840f04092cddbfece6183db10bd93",
+  "tests/integration_results.json": "3589d49c963d91f9ab6fcca41353a2904ee1d96ae1ebfeb1dc04273896725699",
+  "tests/preservation_results.json": "fb4f681035b1851fdaf12cce756cf2be2f117c972d58fcc446c286dac584c4a2",
+  "tests/test_integration.py": "7126722af027c6dcb8fd5dc56610b2fbaa642d966e1703a0cdce1834666be137",
+  "tests/test_extended.py": "5144d0a852b450932ed7d20a42d356b6d26afe21a17741a98158e1e4d1ad1000",
+  "tests/test_results.json": "b9f282e78f2972b2781574ce606e009dfcea38b893525e2c6bd6cc16fb838633",
+  "tests/host_wrapper.c": "e92f4ee265c5373852a8000a5ba513ea537c63d1f2d646b38c1814f69ebb2728"
+}

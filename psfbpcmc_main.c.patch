@@ -1,0 +1,975 @@
+--- original/psfbpcmc_main.c
++++ revised/psfbpcmc_main.c
+@@ -34,8 +34,8 @@
+  *   4. Use measurements at two PWM frequencies to estimate:
+  *        L    = common primary/secondary self-inductance,
+  *        M    = mutual inductance,
+- *        Req  = AC-equivalent rectifier/load resistance,
+- *        Rdc  = estimated DC load resistance, and
++ *        Z1   = receiver fundamental terminal ratio R1+j*X1,
++ *        Z3   = receiver third-harmonic terminal ratio R3+j*X3, and
+  *        k    = magnetic coupling coefficient.
+  *
+  * HIGH-LEVEL DATA FLOW
+@@ -58,7 +58,7 @@
+  *   I1 and I3 complex phasors at frequency f2
+  *                    |
+  *                    v
+- *   Z(f1), Z(3*f1), Z(f2), Z(3*f2) -> bounded L/M/Req search
++ *   Z(f1), Z(3*f1), Z(f2), Z(3*f2) -> complex-load L/M/Z1/Z3 fit
+  *
+  * IMPORTANT UNITS
+  * ---------------
+@@ -118,63 +118,47 @@
+  * Vi need not be zero: dead time and leg phase can rotate both harmonics.
+  * The program forms four complex impedance observations at two frequencies.
+  *
+- * COUPLED-COIL MODEL
+- * ------------------
+- * The estimator assumes equal self-inductances Lp=Ls=L and series-series
+- * compensation. The following reflected-resistance equations apply to the
+- * FUNDAMENTAL with a passive rectifier:
+- *
+- *   Xp(w) = w*L - 1/(w*Cp)
+- *   Xs(w) = w*L - 1/(w*Cs)
+- *   Rt    = Rs + Req
+- *
+- *   Zin(w) = Rp + j*Xp(w) + (w*M)^2 / (Rt + j*Xs(w)).
+- *
+- * Therefore:
+- *
+- *   Rin_pred = Rp + (w*M)^2*Rt / (Rt^2 + Xs^2)
+- *   Xin_pred = Xp - (w*M)^2*Xs / (Rt^2 + Xs^2).
+- *
+- * For a candidate L, define reflected measurements:
+- *
+- *   A = Rin_measured - Rp
+- *   B = Xin_measured - Xp.
+- *
+- * Dividing the reflected real and imaginary equations removes M:
+- *
+- *   Rt = -A*Xs/B
+- *   M  = sqrt(A*(Rt^2 + Xs^2)/Rt) / w.
+- *
+- * The program averages valid Rt/M estimates from the two fundamentals.
+- * For each candidate, infer I2,1=j*w*M*I1,1/(Rt+j*Xs1). In default rectifier
+- * mode, predict Vrect,3=-(Req*|I2,1|/3)*exp(j*3*angle(I2,1)), then solve the
+- * coupled third-harmonic circuit including this source and measured/modeled
+- * primary V3. Do NOT put Req in series with the secondary at 3*f.
+- * All four observations participate in the score for candidate L:
+- *
+- *
+- *   error = sum((Rpred-Rmeas)^2 + (Xpred-Xmeas)^2).
+- *
+- * LOAD AND COUPLING EQUATIONS
+- * ---------------------------
+- * The ideal rectifier fundamental-harmonic approximation is:
+- *
+- *   Req = (8/pi^2)*Rdc, therefore Rdc = (pi^2/8)*Req.
+- *
+- * This assumes an ideal bridge, nearly sinusoidal AC tank current, and nearly
+- * constant DC output voltage. The rectifier's third-harmonic voltage source
+- * also assumes secondary current is dominated by its fundamental. The
+- * switching solution with conduction gaps, diode drop and output ripple is
+- * not modeled. The source dead-time model omits Coss and driver delay.
+- * A good residual is a numerical fit, not proof of physical accuracy.
+- *
+- * The estimate is |M|; primary-only data do not identify winding dot polarity.
+- * Lp=Ls remains a REQUIRED assumption. If the coils differ, use a model with
+- * separate Lp and Ls rather than interpreting this common-L fit as exact.
+- *
+- * With Lp=Ls=L, coupling is:
+- *
+- *   k = M/sqrt(Lp*Ls) = M/L.
++ * COMPLEX-RECEIVER COUPLED-COIL MODEL
++ * ----------------------------------
++ * Based on parameterestimation.m from Parameter estimation.zip, extended to
++ * keep ALL FOUR observations (two frequencies, fundamental and third).
++ *
++ *   Zrec,1 = Rrec1+j*Xrec1; Zrec,3 = Rrec3+j*Xrec3.
++ *   Zp = Rp+j*(w*L-1/(w*Cp)); Zs = Rs+j*(w*L-1/(w*Cs)).
++ *   Zin,h = Zp+(w*M)^2/(Zs+Zrec,h), w=h*2*pi*f.
++ *
++ * The six independent real unknowns are L, |M|, Rrec1, Xrec1, Rrec3, Xrec3.
++ * All eight measured real/imaginary impedance components enter the fit.
++ * Zrec,1 is NOT required to equal Zrec,3. A negative Rrec3 is permitted.
++ * There is no passive-bridge harmonic-voltage prediction or DC conversion.
++ *
++ * REQUIRED ASSUMPTIONS:
++ *   - Series-series compensation and equal self-inductances Lp=Ls=L.
++ *   - Known Cp,Cs and effective series losses Rp,Rs.
++ *   - L and M are stable during the two-frequency experiment.
++ *   - For each harmonic separately, Zrec,h is approximately unchanged between
++ *     f1 and f2. This is an operating-point approximation, not a universal law.
++ *   - Forward receiving operation (Rrec1>=0), sufficient steady-state signals,
++ *     and correctly aligned voltage/current phase measurements.
++ *
++ * This can be applied to diode or synchronous receivers when these electrical
++ * conditions hold; arbitrary receiver control changes are NOT identified.
++ * The receiver ratios are not general linear impedances or DC resistances.
++ * Coupling k=|M|/L. Primary-only measurements do not identify dot polarity.
++ *
++ * The slow solver uses 64-bit long double on C28x for numerical conditioning.
++ * It runs only after collection; acquisition and harmonic extraction remain
++ * fixed point. Finite multistart optimization does not prove global uniqueness.
++ * Solver flags reject detected ambiguity, weak sensitivity, excessive residual
++ * or boundary solutions. A low residual does not prove the physical model.
++ * WPT_identificationModelWarning remains 1 because these assumptions persist.
++ *
++ * WPT_estimatedDcLoadMilliOhm is now the INVALID sentinel 0xFFFFFFFF, and
++ * WPT_estimatedDcLoadValid is always zero. Measure DC quantities separately.
++ *
++ * Primary dead-time reconstruction is unchanged. It remains approximate:
++ * Coss, switching ringing, diode drops and driver delay are not modeled.
++ * Measured primary-voltage overrides are preferred when available.
+  *
+  * FIXED-POINT REPRESENTATIONS
+  * ---------------------------
+@@ -194,6 +178,7 @@
+  */
+ 
+ #include "psfbpcmc.h"
++#include "wpt_complex_estimator.h"
+ 
+ //=============================================================================
+ // Linker symbols used when FLASH builds copy time-critical code into RAM.
+@@ -312,18 +297,12 @@
+ #define WPT_IDENT_STATE_COMPLETE                  6U
+ #define WPT_IDENT_HARMONIC_OBSERVATION_COUNT      4U
+ #define WPT_IDENT_ERROR_COMPONENT_COUNT           8ULL
+-#if WPT_IDENT_RECTIFIER_HARMONIC_MODEL
+-#define WPT_IDENT_PARAMETER_OBSERVATIONS          2U
+-#else
+-#define WPT_IDENT_PARAMETER_OBSERVATIONS          4U
+-#endif
+ 
+ // Fixed-point math constants. Each Q20 constant is round(real_value*2^20).
+ // WPT_TWO_PI_TIMES_1E6 lets the reactance functions work directly with Hz,
+ // nH, pF, and mOhm without floating point.
+ #define WPT_FOUR_OVER_PI_Q20                 1335088L
+ #define WPT_FOUR_OVER_3PI_Q20                 445029L
+-#define WPT_PI_SQUARED_OVER_8_Q20            1293629L
+ #define WPT_TWO_PI_TIMES_1E6                  6283185UL
+ 
+ //=============================================================================
+@@ -427,12 +406,31 @@
+         {0L, 0L};
+ volatile int32_t WPT_identificationThirdInputReactanceMilliOhms[2] =
+         {0L, 0L};
+-// Final results use nH and mOhm so all stored calculations remain integral.
++// Public results use nH and mOhm for CCS compatibility. The NEW slow solver
++// internally uses 64-bit long double; current extraction stays fixed point.
+ // Coupling permille = round(1000*M/L). Residual is RMS impedance error in mOhm.
+ volatile uint32_t WPT_estimatedSelfInductanceNanoHenry = 0UL;
+ volatile uint32_t WPT_estimatedMutualInductanceNanoHenry = 0UL;
+ volatile uint32_t WPT_estimatedEquivalentAcLoadMilliOhm = 0UL;
+-volatile uint32_t WPT_estimatedDcLoadMilliOhm = 0UL;
++// Retained legacy name, but deliberately NOT a numerical estimate.
++volatile uint32_t WPT_estimatedDcLoadMilliOhm = 0xFFFFFFFFUL;
++volatile uint16_t WPT_estimatedDcLoadValid = 0U;
++volatile int32_t WPT_estimatedEquivalentAcReactanceMilliOhm = 0L;
++volatile int32_t WPT_estimatedThirdAcResistanceMilliOhm = 0L;
++volatile int32_t WPT_estimatedThirdAcReactanceMilliOhm = 0L;
++// Solver flags use WPTCE_* definitions in wpt_complex_estimator.h.
++volatile uint16_t WPT_identificationSolverFlags = WPTCE_BAD_INPUT;
++volatile uint16_t WPT_identificationSolutionsChecked = 0U;
++volatile uint32_t WPT_identificationNormalizedResidualPermille = 0UL;
++volatile uint32_t WPT_identificationLRelativeSensitivityPermille = 0UL;
++volatile uint32_t WPT_identificationMRelativeSensitivityPermille = 0UL;
++volatile uint32_t WPT_identificationAlternativeSelfInductanceNanoHenry = 0UL;
++volatile uint32_t WPT_identificationAlternativeMutualInductanceNanoHenry = 0UL;
++// Engineering uncertainty actually supplied to each fit observation, in mOhm.
++volatile uint32_t WPT_identificationImpedanceSigmaMilliOhm[4] = {0UL,0UL,0UL,0UL};
++// Static storage keeps the new solver input/result off the small C28x stack.
++static WPTCE_Input WPT_complexEstimatorInput;
++static WPTCE_Result WPT_complexEstimatorResult;
+ volatile uint16_t WPT_estimatedCouplingPermille = 0U;
+ volatile uint32_t WPT_identificationResidualMilliOhm = 0UL;
+ 
+@@ -510,6 +508,7 @@
+ void WPT_updateIdentificationState(void);
+ void WPT_resetIdentification(void);
+ void WPT_solveIdentification(void);
++static void WPT_clearEstimatorResults(void);
+ uint32_t WPT_integerSquareRoot64(uint64_t value);
+ int32_t WPT_atan2CentiDegrees(int32_t imaginary, int32_t real);
+ int16_t WPT_sineQ15(uint32_t phaseQ32);
+@@ -568,7 +567,7 @@
+  *   497-tick primary-leg lag, rather than the requested 500-tick half-cycle.
+  *   The voltage reconstruction uses the actual primary phase, including
+  *   case 5's offset; it does not assume the Q/angle labels are exact.
+- *   Secondary PWM phases do not enter the passive-rectifier estimator.
++ *   Secondary PWM phases do not enter this terminal-ratio estimator.
+  *
+  * Returns 1 for cases 1..8. Returns 0 for any unknown case; the transition
+  * service treats that as a fault and leaves the bridge outputs low. A return
+@@ -1472,37 +1471,7 @@
+     return (first >= second) ? (first - second) : (second - first);
+ }
+ 
+-/*
+- * Compute first*second/divisor while reducing both first and divisor by the
+- * same powers of two if the direct 64-bit product would overflow. This keeps
+- * their ratio approximately unchanged and protects the fixed-point solver.
+- */
+-static uint64_t WPT_multiplyDivideU64(uint64_t first, uint64_t second,
+-                                      uint64_t divisor)
+-{
+-    uint64_t scaledFirst = first;
+-    uint64_t scaledDivisor = divisor;
+-
+-    if(divisor == 0ULL)
+-    {
+-        return 0xFFFFFFFFFFFFFFFFULL;
+-    }
+-
+-    // Preserve the ratio while preventing the intermediate multiplication
+-    // from overflowing 64 bits.
+-    while((second != 0ULL) &&
+-          (scaledFirst > (0xFFFFFFFFFFFFFFFFULL / second)))
+-    {
+-        scaledFirst >>= 1U;
+-        scaledDivisor >>= 1U;
+-        if(scaledDivisor == 0ULL)
+-        {
+-            return 0xFFFFFFFFFFFFFFFFULL;
+-        }
+-    }
+-
+-    return (scaledFirst * second) / scaledDivisor;
+-}
++
+ 
+ /*
+  * Reconstruct primary bridge voltage using the ACTUAL primary PWM settings.
+@@ -1692,8 +1661,7 @@
+             return;
+         }
+     }
+-    if(((components[0] == 0L) && (components[1] == 0L)) ||
+-       ((components[2] == 0L) && (components[3] == 0L)))
++    if((components[0] == 0L) && (components[1] == 0L))
+     {
+         return;
+     }
+@@ -1853,12 +1821,7 @@
+     WPT_identificationStableCount = 0U;
+     WPT_identificationSettlingCount = 0U;
+     WPT_identificationCandidateFrequencyHz = 0UL;
+-    WPT_estimatedSelfInductanceNanoHenry = 0UL;
+-    WPT_estimatedMutualInductanceNanoHenry = 0UL;
+-    WPT_estimatedEquivalentAcLoadMilliOhm = 0UL;
+-    WPT_estimatedDcLoadMilliOhm = 0UL;
+-    WPT_estimatedCouplingPermille = 0U;
+-    WPT_identificationResidualMilliOhm = 0UL;
++    WPT_clearEstimatorResults();
+     WPT_clearIdentificationAccumulator();
+ 
+     for(point = 0U; point < 2U; point++)
+@@ -2023,7 +1986,7 @@
+ 
+         case WPT_IDENT_STATE_COLLECT_SECOND:
+             // Once the second average is stored, all four harmonic impedances
+-            // are available and the fixed-point parameter search can run.
++            // are available and the slow complex-load parameter solver can run.
+             frequencyDifference = WPT_absoluteFrequencyDifference(
+                     WPT_currentFrequencyHz,
+                     WPT_identificationFrequencyHz[1]);
+@@ -2169,542 +2132,164 @@
+     return 1U;
+ }
+ 
+-#if WPT_IDENT_RECTIFIER_HARMONIC_MODEL
+-/*
+- * Third-harmonic prediction for an IDEAL passive rectifier, retaining the
+- * sinusoidal-secondary-current / constant-DC-voltage approximation at h=1.
+- * Choose secondary current positive into the rectifier and mutual sign so:
+- *   I2,1 = j*w*M*I1,1 / (Rt+j*Xs1),  Rt=Rs+Req.
+- * If I2,1=Ipk*exp(j*phi2), a clamped square rectifier voltage has:
+- *   Vrect,1 = Req*I2,1
+- *   Vrect,3 = -(Req*Ipk/3)*exp(j*3*phi2).
+- * Its third harmonic is therefore a SOURCE, not Req times I2,3.
+- * With Zp3=Rp+j*Xp3 and Zs3=Rs+j*Xs3 (NO Req in Zs3):
+- *   Vp3 = Zp3*Ip3 - j*3*w*M*Is3
+- *   j*3*w*M*Ip3 = Zs3*Is3 + Vrect,3
+- * hence
+- *   Ip3 = (Zs3*Vp3 - j*3*w*M*Vrect,3) /
+- *         (Zp3*Zs3 + (3*w*M)^2).
+- * Return Vp3/Ip3 so the existing eight-component impedance score retains
+- * its mOhm units. Vp3 here includes primary dead time and its complex phase.
+- * This is harmonic balance under the assumptions above, not an exact
+- * diode-switching solution. Only |M| is identifiable with primary data.
+- */
+-static uint16_t WPT_predictRectifierThirdImpedance(uint16_t point,
+-        uint32_t inductance, uint32_t mutual, uint32_t totalResistance,
+-        int32_t *resistance, int32_t *reactance)
+-{
+-    uint32_t f = WPT_identificationFrequencyHz[point];
+-    int64_t xs1 = (int64_t)WPT_reactanceMilliOhm(f, inductance) -
+-                    WPT_capacitiveReactanceMilliOhm(f, WPT_SECONDARY_CAPACITANCE_PF);
+-    int64_t xm1 = WPT_reactanceMilliOhm(f, mutual);
+-    int64_t rt = totalResistance;
+-    int64_t ir = WPT_identificationI1RealMilliAmps[point];
+-    int64_t ii = WPT_identificationI1ImagMilliAmps[point];
+-    int64_t denominator = rt*rt + xs1*xs1;
+-    int64_t i2r, i2i;
+-    uint32_t i2amplitude;
+-    int32_t angle;
+-    uint32_t phase3;
+-    int64_t vrectAmplitude, vrectReal, vrectImag;
+-    int64_t xp3, xs3, xm3;
+-    int64_t rp = WPT_PRIMARY_RESISTANCE_MOHM;
+-    int64_t rs = WPT_SECONDARY_RESISTANCE_MOHM;
+-    int64_t vr = WPT_identificationV3RealMilliVolts[point];
+-    int64_t vi = WPT_identificationV3ImagMilliVolts[point];
+-    int64_t nr, ni, dr, di;
+-    int32_t predictedIr, predictedIi;
+-
+-    if((denominator == 0LL) || (ir > 100000LL) || (ir < -100000LL) ||
+-       (ii > 100000LL) || (ii < -100000LL))
+-    {
+-        return 0U;
+-    }
+-    i2r = xm1*(ir*xs1 - ii*rt)/denominator;
+-    i2i = xm1*(ir*rt + ii*xs1)/denominator;
+-    if((i2r > 1000000LL) || (i2r < -1000000LL) ||
+-       (i2i > 1000000LL) || (i2i < -1000000LL))
+-    {
+-        return 0U;
+-    }
+-    i2amplitude = WPT_integerSquareRoot64((uint64_t)(i2r*i2r+i2i*i2i));
+-    angle = WPT_atan2CentiDegrees((int32_t)i2i, (int32_t)i2r);
+-    phase3 = (uint32_t)(((int64_t)angle * 3LL * 4294967296LL)/36000LL);
+-    // mOhm*mA/1000 = mV; the extra factor 3 is harmonic amplitude scaling.
+-    vrectAmplitude = (rt-rs)*i2amplitude/3000LL;
+-    if((vrectAmplitude < 0LL) || (vrectAmplitude > 2000000LL))
+-    {
+-        return 0U;
+-    }
+-    vrectReal = -vrectAmplitude*WPT_sineQ15(phase3+0x40000000UL)/32768LL;
+-    vrectImag = -vrectAmplitude*WPT_sineQ15(phase3)/32768LL;
+-    xp3 = (int64_t)WPT_reactanceMilliOhm(3UL*f, inductance) -
+-                  WPT_capacitiveReactanceMilliOhm(3UL*f, WPT_PRIMARY_CAPACITANCE_PF);
+-    xs3 = (int64_t)WPT_reactanceMilliOhm(3UL*f, inductance) -
+-                  WPT_capacitiveReactanceMilliOhm(3UL*f, WPT_SECONDARY_CAPACITANCE_PF);
+-    xm3 = WPT_reactanceMilliOhm(3UL*f, mutual);
+-    nr = rs*vr - xs3*vi + xm3*vrectImag;
+-    ni = rs*vi + xs3*vr - xm3*vrectReal;
+-    dr = rp*rs - xp3*xs3 + xm3*xm3;
+-    di = rp*xs3 + rs*xp3;
+-    // Scale numerator AND denominator by the same power of two before complex
+-    // division. These bounds keep dot products times 1000 inside signed 64-bit.
+-    while((dr > 1000000LL) || (dr < -1000000LL) ||
+-          (di > 1000000LL) || (di < -1000000LL) ||
+-          (nr > 1000000000LL) || (nr < -1000000000LL) ||
+-          (ni > 1000000000LL) || (ni < -1000000000LL))
+-    {
+-        nr /= 2LL; ni /= 2LL; dr /= 2LL; di /= 2LL;
+-    }
+-    // Same complex division routine: N/D is amperes here, so x1000 gives mA.
+-    if(WPT_calculateInputImpedance((int32_t)nr, (int32_t)ni,
+-             (int32_t)dr, (int32_t)di, &predictedIr, &predictedIi) == 0U)
+-    {
+-        return 0U;
+-    }
+-    return WPT_calculateInputImpedance((int32_t)vr, (int32_t)vi,
+-             predictedIr, predictedIi, resistance, reactance);
+-}
+-#endif
+-
+-/*
+- * Score one candidate common self-inductance L.
+- *
+- * Observation order:
+- *   0 = fundamental at f1, 1 = fundamental at f2,
+- *   2 = third at 3*f1,   3 = third at 3*f2.
+- *
+- * For every observation w=2*pi*f:
+- *   Xp = w*L - 1/(w*Cp)
+- *   Xs = w*L - 1/(w*Cs)
+- *   A  = Rmeas - Rp
+- *   B  = Xmeas - Xp.
+- *
+- * From Zref=(w*M)^2/(Rt+j*Xs):
+- *   A = (w*M)^2*Rt/(Rt^2+Xs^2)
+- *   B = -(w*M)^2*Xs/(Rt^2+Xs^2)
+- * so each observation can estimate:
+- *   Rt = -A*Xs/B
+- *   M  = sqrt(A*(Rt^2+Xs^2)/Rt)/w.
+- *
+- * Rt and M are averaged from fundamental observations in passive-rectifier
+- * mode; the third is predicted using WPT_predictRectifierThirdImpedance().
+- * Linear-resistor test mode applies the inversion at all four observations.
+- * All four predicted impedances contribute eight squared error components. UINT64_MAX
+- * marks an impossible/nonphysical candidate (negative reflected resistance,
+- * Rt<=Rs, M>L, division by zero, or arithmetic failure).
+- */
+-static uint64_t WPT_candidateIdentificationError(
+-        uint32_t inductanceNanoHenry,
+-        uint32_t *mutualNanoHenry,
+-        uint32_t *totalSecondaryResistanceMilliOhm)
+-{
+-    uint32_t observationFrequencyHz[WPT_IDENT_HARMONIC_OBSERVATION_COUNT];
+-    int32_t measuredResistance[WPT_IDENT_HARMONIC_OBSERVATION_COUNT];
+-    int32_t measuredReactance[WPT_IDENT_HARMONIC_OBSERVATION_COUNT];
+-    int32_t primaryReactance[WPT_IDENT_HARMONIC_OBSERVATION_COUNT];
+-    int32_t secondaryReactance[WPT_IDENT_HARMONIC_OBSERVATION_COUNT];
+-    int64_t reflectedReal[WPT_IDENT_HARMONIC_OBSERVATION_COUNT];
+-    int64_t reflectedImag[WPT_IDENT_HARMONIC_OBSERVATION_COUNT];
+-    int64_t resistanceEstimate[WPT_IDENT_HARMONIC_OBSERVATION_COUNT];
+-    uint16_t resistanceCount = 0U;
+-    int64_t totalResistance = 0LL;
+-    uint64_t mutualEstimateSum = 0ULL;
+-    uint16_t mutualCount = 0U;
+-    uint64_t denominator;
+-    uint64_t mutualReactanceSquared;
+-    uint64_t mutualReactance;
+-    uint64_t mutualEstimate;
+-    int64_t predictedResistance;
+-    int64_t predictedReactance;
+-    int64_t errorComponent;
+-    uint64_t error = 0ULL;
+-    uint16_t point;
+-
+-    // Build the four measurement records. The third-harmonic circuit frequency
+-    // is three times the measured fundamental frequency.
+-    // Four complex observations are fitted with one common L, M, and Req:
+-    // fundamental at f0/f1, followed by third harmonic at 3*f0/3*f1.
+-    for(point = 0U; point < 2U; point++)
+-    {
+-        observationFrequencyHz[point] =
+-                WPT_identificationFrequencyHz[point];
+-        measuredResistance[point] =
+-                WPT_identificationInputResistanceMilliOhms[point];
+-        measuredReactance[point] =
+-                WPT_identificationInputReactanceMilliOhms[point];
+-        observationFrequencyHz[point + 2U] =
+-                3UL * WPT_identificationFrequencyHz[point];
+-        measuredResistance[point + 2U] =
+-                WPT_identificationThirdInputResistanceMilliOhms[point];
+-        measuredReactance[point + 2U] =
+-                WPT_identificationThirdInputReactanceMilliOhms[point];
+-    }
+-
+-    // For this candidate L, calculate path reactances and reflected impedance.
+-    for(point = 0U; point < WPT_IDENT_HARMONIC_OBSERVATION_COUNT; point++)
+-    {
+-        primaryReactance[point] = WPT_reactanceMilliOhm(
+-                observationFrequencyHz[point],
+-                inductanceNanoHenry) -
+-                WPT_capacitiveReactanceMilliOhm(
+-                        observationFrequencyHz[point],
+-                        WPT_PRIMARY_CAPACITANCE_PF);
+-        secondaryReactance[point] = WPT_reactanceMilliOhm(
+-                observationFrequencyHz[point],
+-                inductanceNanoHenry) -
+-                WPT_capacitiveReactanceMilliOhm(
+-                        observationFrequencyHz[point],
+-                        WPT_SECONDARY_CAPACITANCE_PF);
+-        reflectedReal[point] =
+-                (int64_t)measuredResistance[point] -
+-                (int64_t)WPT_PRIMARY_RESISTANCE_MOHM;
+-        reflectedImag[point] =
+-                (int64_t)measuredReactance[point] -
+-                (int64_t)primaryReactance[point];
+-
+-        // A rectifier can transfer energy between harmonics, so its apparent
+-        // third-harmonic input resistance need not be positive. Apply the
+-        // reflected-resistance inversion only to the fundamental in mode 1.
+-        if((secondaryReactance[point] > 10000000L) ||
+-           (secondaryReactance[point] < -10000000L) ||
+-           (primaryReactance[point] > 10000000L) ||
+-           (primaryReactance[point] < -10000000L))
+-        {
+-            return 0xFFFFFFFFFFFFFFFFULL;
+-        }
+-        if(point >= WPT_IDENT_PARAMETER_OBSERVATIONS)
+-        {
+-            continue;
+-        }
+-        if((reflectedReal[point] <= 0LL) ||
+-           (reflectedReal[point] > 10000000LL) ||
+-           (secondaryReactance[point] > 10000000L) ||
+-           (secondaryReactance[point] < -10000000L))
+-        {
+-            return 0xFFFFFFFFFFFFFFFFULL;
+-        }
+-
+-        if((reflectedImag[point] != 0LL) &&
+-           (secondaryReactance[point] != 0L))
+-        {
+-            resistanceEstimate[point] =
+-                    -(reflectedReal[point] *
+-                      (int64_t)secondaryReactance[point]) /
+-                    reflectedImag[point];
+-            if((resistanceEstimate[point] > 0LL) &&
+-               (resistanceEstimate[point] <= 10000000LL))
+-            {
+-                totalResistance += resistanceEstimate[point];
+-                resistanceCount++;
+-            }
+-        }
+-    }
+-
+-    // At least one observation must provide a finite positive Rt estimate.
+-    if(resistanceCount == 0U)
+-    {
+-        return 0xFFFFFFFFFFFFFFFFULL;
+-    }
+-    totalResistance /= (int64_t)resistanceCount;
+-    if(totalResistance <= (int64_t)WPT_SECONDARY_RESISTANCE_MOHM)
+-    {
+-        return 0xFFFFFFFFFFFFFFFFULL;
+-    }
+-
+-    // Rt and M are inferred from the fundamental observations in rectifier
+-    // mode. The third harmonic still helps choose L through the score below.
+-    // This is a bounded profile search with conditional averages, not an
+-    // unconstrained three-parameter global least-squares optimizer.
+-    for(point = 0U; point < WPT_IDENT_PARAMETER_OBSERVATIONS; point++)
+-    {
+-        denominator = (uint64_t)(totalResistance * totalResistance) +
+-                (uint64_t)((int64_t)secondaryReactance[point] *
+-                           (int64_t)secondaryReactance[point]);
+-        mutualReactanceSquared = WPT_multiplyDivideU64(
+-                (uint64_t)reflectedReal[point], denominator,
+-                (uint64_t)totalResistance);
+-        if((mutualReactanceSquared == 0ULL) ||
+-           (mutualReactanceSquared == 0xFFFFFFFFFFFFFFFFULL))
+-        {
+-            return 0xFFFFFFFFFFFFFFFFULL;
+-        }
+-        mutualReactance =
+-                (uint64_t)WPT_integerSquareRoot64(mutualReactanceSquared);
+-        mutualEstimate = WPT_multiplyDivideU64(
+-                mutualReactance, 1000000000000ULL,
+-                (uint64_t)WPT_TWO_PI_TIMES_1E6 *
+-                (uint64_t)observationFrequencyHz[point]);
+-        if((mutualEstimate == 0ULL) ||
+-           (mutualEstimate > (uint64_t)inductanceNanoHenry))
+-        {
+-            return 0xFFFFFFFFFFFFFFFFULL;
+-        }
+-        mutualEstimateSum += mutualEstimate;
+-        mutualCount++;
+-    }
+-
+-    *mutualNanoHenry = (uint32_t)
+-            (mutualEstimateSum / (uint64_t)mutualCount);
+-    *totalSecondaryResistanceMilliOhm = (uint32_t)totalResistance;
+-
+-    // Recalculate all four complex input impedances from the candidate L, M,
+-    // and equivalent secondary resistance. Both harmonics affect the search.
+-    for(point = 0U; point < WPT_IDENT_HARMONIC_OBSERVATION_COUNT; point++)
+-    {
+-        int64_t mutualReactanceMilliOhm = WPT_reactanceMilliOhm(
+-                observationFrequencyHz[point],
+-                *mutualNanoHenry);
+-        uint64_t mutualSquared =
+-                (uint64_t)(mutualReactanceMilliOhm *
+-                           mutualReactanceMilliOhm);
+-        denominator = (uint64_t)(totalResistance * totalResistance) +
+-                (uint64_t)((int64_t)secondaryReactance[point] *
+-                           (int64_t)secondaryReactance[point]);
+-        predictedResistance = (int64_t)WPT_PRIMARY_RESISTANCE_MOHM +
+-                (int64_t)WPT_multiplyDivideU64(
+-                        mutualSquared, (uint64_t)totalResistance,
+-                        denominator);
+-        predictedReactance = (int64_t)primaryReactance[point];
+-        if(secondaryReactance[point] >= 0L)
+-        {
+-            predictedReactance -= (int64_t)WPT_multiplyDivideU64(
+-                    mutualSquared,
+-                    (uint64_t)secondaryReactance[point], denominator);
+-        }
+-        else
+-        {
+-            predictedReactance += (int64_t)WPT_multiplyDivideU64(
+-                    mutualSquared,
+-                    (uint64_t)(-(int64_t)secondaryReactance[point]),
+-                    denominator);
+-        }
+-
+-#if WPT_IDENT_RECTIFIER_HARMONIC_MODEL
+-        if(point >= 2U)
+-        {
+-            int32_t rectifierR, rectifierX;
+-            if(WPT_predictRectifierThirdImpedance((uint16_t)(point-2U),
+-                 inductanceNanoHenry, *mutualNanoHenry,
+-                 *totalSecondaryResistanceMilliOhm, &rectifierR, &rectifierX)==0U)
+-            {
+-                return 0xFFFFFFFFFFFFFFFFULL;
+-            }
+-            predictedResistance = rectifierR;
+-            predictedReactance = rectifierX;
+-        }
+-#endif
+-        errorComponent = predictedResistance -
+-                (int64_t)measuredResistance[point];
+-        if((errorComponent > 10000000LL) || (errorComponent < -10000000LL))
+-        {
+-            return 0xFFFFFFFFFFFFFFFFULL;
+-        }
+-        error += (uint64_t)(errorComponent * errorComponent);
+-        errorComponent = predictedReactance -
+-                (int64_t)measuredReactance[point];
+-        if((errorComponent > 10000000LL) || (errorComponent < -10000000LL))
+-        {
+-            return 0xFFFFFFFFFFFFFFFFULL;
+-        }
+-        error += (uint64_t)(errorComponent * errorComponent);
+-    }
+-
+-    return error;
+-}
+-
+-/*
+- * WPT_solveIdentification
+- * -----------------------
+- * Converts the stored current phasors to four measured input impedances and
+- * performs a coarse-to-fine bounded search for L. No floating point is used.
+- *
+- * Use stored complex V1/V3, reconstructed with primary phase and dead time
+- * or supplied as measured phasors. The ideal +/-4*Vs/(h*pi) expressions are
+- * only a zero-dead-time, exactly 180-degree bridge special case.
+- *
+- * For each candidate L, WPT_candidateIdentificationError() estimates Rt and M
+- * and returns the eight-component impedance error. After each search pass, the
+- * next interval is narrowed to +/- two previous step widths around the best L.
+- *
+- * Final conversions:
+- *   Req = Rt-Rs
+- *   Rdc = (pi^2/8)*Req
+- *   k   = M/L because Lp=Ls=L
+- *   residual = sqrt(best_error/8).
++/* BEGIN WPT COMPLEX ESTIMATOR INTEGRATION (also compiled by host tests) */
++/* Saturating conversions preserve existing integer CCS display units. */
++static uint32_t WPT_estimateToU32(WPTCE_Real value)
++{
++    if(!WPTCE_finite(value) || value<=0) return 0UL;
++    if(value>=WPTCE_R(4294967294.0)) return 0xFFFFFFFEUL;
++    return (uint32_t)(value+WPTCE_R(0.5));
++}
++static int32_t WPT_estimateToI32(WPTCE_Real value)
++{
++    if(!WPTCE_finite(value)) return 0L;
++    if(value>WPTCE_R(2147483646.0)) return 2147483646L;
++    if(value<-WPTCE_R(2147483646.0)) return -2147483646L;
++    return (int32_t)(value+(value>=0?WPTCE_R(0.5):-WPTCE_R(0.5)));
++}
++
++/* Fail closed: no stale accepted result or numerical DC load survives a reset
++ * or an unsuccessful solve. Fitted values may later be published for diagnosis,
++ * but must never be used unless WPT_identificationValid is one. */
++static void WPT_clearEstimatorResults(void)
++{
++    uint16_t q;
++    WPT_identificationValid=0U;
++    WPT_estimatedSelfInductanceNanoHenry=0UL;
++    WPT_estimatedMutualInductanceNanoHenry=0UL;
++    WPT_estimatedEquivalentAcLoadMilliOhm=0UL;
++    WPT_estimatedEquivalentAcReactanceMilliOhm=0L;
++    WPT_estimatedThirdAcResistanceMilliOhm=0L;
++    WPT_estimatedThirdAcReactanceMilliOhm=0L;
++    WPT_estimatedDcLoadMilliOhm=0xFFFFFFFFUL;
++    WPT_estimatedDcLoadValid=0U;
++    WPT_estimatedCouplingPermille=0U;
++    WPT_identificationResidualMilliOhm=0UL;
++    WPT_identificationSolverFlags=WPTCE_BAD_INPUT;
++    WPT_identificationSolutionsChecked=0U;
++    WPT_identificationNormalizedResidualPermille=0UL;
++    WPT_identificationLRelativeSensitivityPermille=0UL;
++    WPT_identificationMRelativeSensitivityPermille=0UL;
++    WPT_identificationAlternativeSelfInductanceNanoHenry=0UL;
++    WPT_identificationAlternativeMutualInductanceNanoHenry=0UL;
++    for(q=0U;q<4U;++q) WPT_identificationImpedanceSigmaMilliOhm[q]=0UL;
++}
++
++/* WPT_solveIdentification
++ *
++ * Use the actual measured/reconstructed complex V1,V3, including their phases.
++ * Reuse the existing fixed-point complex division and current capture pipeline.
++ * Convert to ohms once, then fit the six-unknown complex-receiver model.
++ * No receiver PWM waveform, diode drop, pi^2/8 factor, or DC estimate is used.
++ * This function must be called in the existing paused-analysis context, NOT
++ * inside the ADC ISR. Target runtime and memory must be checked in CCS.
+  */
+ void WPT_solveIdentification(void)
+ {
+-    uint32_t searchMinimum;
+-    uint32_t searchMaximum;
+-    uint32_t searchSpan;
+-    uint32_t searchStep;
+-    uint32_t candidateInductance;
+-    uint32_t candidateMutual;
+-    uint32_t candidateResistance;
+-    uint32_t bestInductance = 0UL;
+-    uint32_t bestMutual = 0UL;
+-    uint32_t bestResistance = 0UL;
+-    uint64_t candidateError;
+-    uint64_t bestError = 0xFFFFFFFFFFFFFFFFULL;
+-    uint64_t dcLoad;
+-    int32_t inputResistance;
+-    int32_t inputReactance;
+-    uint16_t pass;
+-    uint16_t stepIndex;
+-    uint16_t point;
+-
+-    WPT_identificationValid = 0U;
+-    // A low residual does not validate either physical approximation.
+-    WPT_identificationModelWarning =
+-        ((WPT_IDENT_RECTIFIER_HARMONIC_MODEL != 0U) ||
+-         (WPT_identificationVoltageApproximate[0] != 0U) ||
+-         (WPT_identificationVoltageApproximate[1] != 0U)) ? 1U : 0U;
+-
+-    if((WPT_PRIMARY_SQUARE_PEAK_MV <= 0L) ||
+-       (WPT_PRIMARY_RESISTANCE_MOHM < 0L) ||
+-       (WPT_SECONDARY_RESISTANCE_MOHM < 0L) ||
+-       (WPT_PRIMARY_CAPACITANCE_PF == 0UL) ||
+-       (WPT_SECONDARY_CAPACITANCE_PF == 0UL) ||
+-       (WPT_identificationFrequencyHz[0] == 0UL) ||
+-       (WPT_identificationFrequencyHz[1] == 0UL) ||
+-       (WPT_identificationThirdValid[0] == 0U) ||
+-       (WPT_identificationThirdValid[1] == 0U) ||
+-       (WPT_identificationVoltageValid[0] == 0U) ||
+-       (WPT_identificationVoltageValid[1] == 0U) ||
+-       (WPT_PRIMARY_RESISTANCE_MOHM > 10000000L) ||
+-       (WPT_SECONDARY_RESISTANCE_MOHM > 10000000L) ||
+-       (WPT_IDENT_MIN_SELF_INDUCTANCE_NH == 0UL) ||
+-       (WPT_IDENT_MAX_SELF_INDUCTANCE_NH > 500000UL) ||
+-       (WPT_IDENT_MIN_SELF_INDUCTANCE_NH > WPT_IDENT_MAX_SELF_INDUCTANCE_NH) ||
+-       (WPT_identificationFrequencyHz[0] > 150000UL) ||
+-       (WPT_identificationFrequencyHz[1] > 150000UL))
+-    {
+-        WPT_identificationModelWarning = 1U;
+-        return;
+-    }
+-
+-    for(point = 0U; point < 2U; point++)
+-    {
+-        if(WPT_calculateInputImpedance(
+-                WPT_identificationV1RealMilliVolts[point],
+-                WPT_identificationV1ImagMilliVolts[point],
+-                WPT_identificationI1RealMilliAmps[point],
+-                WPT_identificationI1ImagMilliAmps[point],
+-                &inputResistance, &inputReactance)
+-           == 0U)
+-        {
+-            WPT_identificationModelWarning = 1U;
+-            return;
+-        }
+-        WPT_identificationInputResistanceMilliOhms[point] =
+-                inputResistance;
+-        WPT_identificationInputReactanceMilliOhms[point] =
+-                inputReactance;
+-
+-        // Use the stored complex third voltage for THIS operating point;
+-        // dead time/current polarity can change both magnitude and angle.
+-        if(WPT_calculateInputImpedance(
+-                WPT_identificationV3RealMilliVolts[point],
+-                WPT_identificationV3ImagMilliVolts[point],
+-                WPT_identificationI3RealMilliAmps[point],
+-                WPT_identificationI3ImagMilliAmps[point],
+-                &inputResistance, &inputReactance)
+-           == 0U)
+-        {
+-            WPT_identificationModelWarning = 1U;
+-            return;
+-        }
+-        WPT_identificationThirdInputResistanceMilliOhms[point] =
+-                inputResistance;
+-        WPT_identificationThirdInputReactanceMilliOhms[point] =
+-                inputReactance;
+-    }
+-
+-    searchMinimum = WPT_IDENT_MIN_SELF_INDUCTANCE_NH;
+-    searchMaximum = WPT_IDENT_MAX_SELF_INDUCTANCE_NH;
+-
+-    for(pass = 0U; pass < WPT_IDENT_L_SEARCH_PASSES; pass++)
+-    {
+-        searchSpan = searchMaximum - searchMinimum;
+-        searchStep = searchSpan / (uint32_t)WPT_IDENT_L_SEARCH_STEPS;
+-        if(searchStep == 0UL)
+-        {
+-            searchStep = 1UL;
+-        }
+-
+-        for(stepIndex = 0U;
+-            stepIndex <= WPT_IDENT_L_SEARCH_STEPS;
+-            stepIndex++)
+-        {
+-            candidateInductance = searchMinimum + (uint32_t)
+-                    (((uint64_t)searchSpan * (uint64_t)stepIndex) /
+-                     (uint64_t)WPT_IDENT_L_SEARCH_STEPS);
+-            candidateError = WPT_candidateIdentificationError(
+-                    candidateInductance, &candidateMutual,
+-                    &candidateResistance);
+-            if(candidateError < bestError)
+-            {
+-                bestError = candidateError;
+-                bestInductance = candidateInductance;
+-                bestMutual = candidateMutual;
+-                bestResistance = candidateResistance;
+-            }
+-        }
+-
+-        if(bestInductance == 0UL)
+-        {
+-            WPT_identificationModelWarning = 1U;
+-            return;
+-        }
+-
+-        if(bestInductance > (2UL * searchStep))
+-        {
+-            searchMinimum = (uint32_t)
+-                    (bestInductance - (2UL * searchStep));
+-        }
+-        else
+-        {
+-            searchMinimum = WPT_IDENT_MIN_SELF_INDUCTANCE_NH;
+-        }
+-        searchMaximum = (uint32_t)
+-                (bestInductance + (2UL * searchStep));
+-        if(searchMinimum < WPT_IDENT_MIN_SELF_INDUCTANCE_NH)
+-        {
+-            searchMinimum = WPT_IDENT_MIN_SELF_INDUCTANCE_NH;
+-        }
+-        if(searchMaximum > WPT_IDENT_MAX_SELF_INDUCTANCE_NH)
+-        {
+-            searchMaximum = WPT_IDENT_MAX_SELF_INDUCTANCE_NH;
+-        }
+-    }
+-
+-    WPT_estimatedSelfInductanceNanoHenry = bestInductance;
+-    WPT_estimatedMutualInductanceNanoHenry = bestMutual;
+-    WPT_estimatedEquivalentAcLoadMilliOhm =
+-            bestResistance - (uint32_t)WPT_SECONDARY_RESISTANCE_MOHM;
+-    dcLoad = ((uint64_t)WPT_estimatedEquivalentAcLoadMilliOhm *
+-              (uint64_t)WPT_PI_SQUARED_OVER_8_Q20 + (1ULL << 19U)) >> 20U;
+-    WPT_estimatedDcLoadMilliOhm = (uint32_t)dcLoad;
+-    WPT_estimatedCouplingPermille = (uint16_t)
+-            (((uint64_t)bestMutual * 1000ULL +
+-              ((uint64_t)bestInductance / 2ULL)) /
+-             (uint64_t)bestInductance);
+-    WPT_identificationResidualMilliOhm = WPT_integerSquareRoot64(
+-            bestError / WPT_IDENT_ERROR_COMPONENT_COUNT);
+-
+-    if((WPT_identificationResidualMilliOhm <=
+-        WPT_IDENT_MAX_IMPEDANCE_RESIDUAL_MOHM) &&
+-       (WPT_estimatedCouplingPermille <= 1000U))
+-    {
+-        WPT_identificationValid = 1U;
+-    }
+-    else
+-    {
+-        WPT_identificationModelWarning = 1U;
+-    }
+-
+-}
++    uint16_t q,point;
++    int32_t vr,vi,ir,ii,zr,zi;
++    WPTCE_Real currentMagnitude,zMagnitude,sigma,noiseVoltage,noiseCurrent;
++    WPTCE_Real *p=WPT_complexEstimatorResult.p;
++    WPT_clearEstimatorResults();
++    // Even with measured voltage, frequency-invariant receiver ratios and
++    // Lp=Ls are modeling assumptions; a fit alone cannot verify them.
++    WPT_identificationModelWarning=1U;
++    for(point=0U;point<2U;++point) {
++        if(WPT_identificationFrequencyHz[point]<WPT_CURRENT_MIN_FREQUENCY_HZ ||
++           WPT_identificationFrequencyHz[point]>WPT_CURRENT_MAX_FREQUENCY_HZ ||
++           WPT_identificationVoltageValid[point]==0U) return;
++        if(WPT_identificationThirdValid[point]==0U) {
++            WPT_identificationSolverFlags=WPTCE_MISSING_THIRD;
++            return; // Do NOT silently turn this into a fundamental-only fit.
++        }
++        WPT_complexEstimatorInput.frequency_hz[point]=
++            (WPTCE_Real)WPT_identificationFrequencyHz[point];
++    }
++    if(WPT_IDENT_IMPEDANCE_NOISE_FLOOR_MOHM<=0L ||
++       WPT_IDENT_IMPEDANCE_RELATIVE_NOISE_PERMILLE<0L ||
++       WPT_IDENT_VOLTAGE_PHASOR_NOISE_MV<0L ||
++       WPT_IDENT_CURRENT_PHASOR_NOISE_MA<0L) return;
++    for(q=0U;q<4U;++q) {
++        point=q%2U;
++        if(q<2U) {
++            vr=WPT_identificationV1RealMilliVolts[point];
++            vi=WPT_identificationV1ImagMilliVolts[point];
++            ir=WPT_identificationI1RealMilliAmps[point];
++            ii=WPT_identificationI1ImagMilliAmps[point];
++        } else {
++            vr=WPT_identificationV3RealMilliVolts[point];
++            vi=WPT_identificationV3ImagMilliVolts[point];
++            ir=WPT_identificationI3RealMilliAmps[point];
++            ii=WPT_identificationI3ImagMilliAmps[point];
++        }
++        // Also guard the inherited fixed-point V/I numerator against overflow.
++        if(vr>2000000L || vr<-2000000L || vi>2000000L || vi<-2000000L ||
++           ir>1000000L || ir<-1000000L || ii>1000000L || ii<-1000000L) {
++            WPT_identificationSolverFlags=WPTCE_BAD_PHASOR; return;
++        }
++        currentMagnitude=WPTCE_sqrt((WPTCE_Real)ir*ir+(WPTCE_Real)ii*ii);
++        if(currentMagnitude < (WPTCE_Real)(q<2U ?
++                WPT_IDENT_MIN_FUNDAMENTAL_CURRENT_MA : WPT_IDENT_MIN_THIRD_CURRENT_MA) ||
++           WPT_calculateInputImpedance(vr,vi,ir,ii,&zr,&zi)==0U) {
++            WPT_identificationSolverFlags=WPTCE_BAD_PHASOR; return;
++        }
++        if(q<2U) {
++            WPT_identificationInputResistanceMilliOhms[point]=zr;
++            WPT_identificationInputReactanceMilliOhms[point]=zi;
++        } else {
++            WPT_identificationThirdInputResistanceMilliOhms[point]=zr;
++            WPT_identificationThirdInputReactanceMilliOhms[point]=zi;
++        }
++        WPT_complexEstimatorInput.zin_real_ohm[q]=(WPTCE_Real)zr/1000;
++        WPT_complexEstimatorInput.zin_imag_ohm[q]=(WPTCE_Real)zi/1000;
++        zMagnitude=WPTCE_sqrt((WPTCE_Real)zr*zr+(WPTCE_Real)zi*zi)/1000;
++        // Propagation for Z=V/I: sigmaZ ~= sqrt(sigmaV^2+|Z|^2*sigmaI^2)/|I|.
++        // mV/mA=ohms. Add an absolute floor and relative calibration allowance.
++        // These settings are engineering allowances, NOT measured statistics.
++        noiseVoltage=(WPTCE_Real)WPT_IDENT_VOLTAGE_PHASOR_NOISE_MV;
++        noiseCurrent=zMagnitude*(WPTCE_Real)WPT_IDENT_CURRENT_PHASOR_NOISE_MA;
++        sigma=WPTCE_sqrt(noiseVoltage*noiseVoltage+noiseCurrent*noiseCurrent)/currentMagnitude;
++        sigma+=(WPTCE_Real)WPT_IDENT_IMPEDANCE_NOISE_FLOOR_MOHM/1000;
++        sigma+=zMagnitude*(WPTCE_Real)WPT_IDENT_IMPEDANCE_RELATIVE_NOISE_PERMILLE/1000;
++        WPT_complexEstimatorInput.sigma_ohm[q]=sigma;
++        WPT_identificationImpedanceSigmaMilliOhm[q]=WPT_estimateToU32(1000*sigma);
++    }
++    WPT_complexEstimatorInput.cp_pf=(WPTCE_Real)WPT_PRIMARY_CAPACITANCE_PF;
++    WPT_complexEstimatorInput.cs_pf=(WPTCE_Real)WPT_SECONDARY_CAPACITANCE_PF;
++    WPT_complexEstimatorInput.rp_ohm=(WPTCE_Real)WPT_PRIMARY_RESISTANCE_MOHM/1000;
++    WPT_complexEstimatorInput.rs_ohm=(WPTCE_Real)WPT_SECONDARY_RESISTANCE_MOHM/1000;
++    WPT_complexEstimatorInput.min_l_uh=(WPTCE_Real)WPT_IDENT_MIN_SELF_INDUCTANCE_NH/1000;
++    WPT_complexEstimatorInput.max_l_uh=(WPTCE_Real)WPT_IDENT_MAX_SELF_INDUCTANCE_NH/1000;
++    WPT_complexEstimatorInput.min_frequency_separation_hz=(WPTCE_Real)WPT_IDENT_FREQUENCY_CHANGE_HZ;
++    WPT_complexEstimatorInput.max_receiver_magnitude_ohm=(WPTCE_Real)WPT_IDENT_MAX_RECEIVER_COMPONENT_MOHM/1000;
++    WPT_complexEstimatorInput.max_normalized_rms=(WPTCE_Real)WPT_IDENT_MAX_NORMALIZED_RMS_PERMILLE/1000;
++    WPT_complexEstimatorInput.max_relative_sensitivity=(WPTCE_Real)WPT_IDENT_MAX_RELATIVE_SENSITIVITY_PERMILLE/1000;
++    WPT_complexEstimatorInput.ambiguity_delta_cost=(WPTCE_Real)WPT_IDENT_AMBIGUITY_DELTA_COST;
++    WPTCE_estimate(&WPT_complexEstimatorInput,&WPT_complexEstimatorResult);
++    WPT_identificationSolverFlags=WPT_complexEstimatorResult.flags;
++    WPT_identificationSolutionsChecked=WPT_complexEstimatorResult.solutions_checked;
++    WPT_identificationResidualMilliOhm=WPT_estimateToU32(1000*WPT_complexEstimatorResult.rms_ohm);
++    WPT_identificationNormalizedResidualPermille=WPT_estimateToU32(1000*WPT_complexEstimatorResult.normalized_rms);
++    WPT_identificationLRelativeSensitivityPermille=WPT_estimateToU32(1000*WPT_complexEstimatorResult.relative_l_sensitivity);
++    WPT_identificationMRelativeSensitivityPermille=WPT_estimateToU32(1000*WPT_complexEstimatorResult.relative_m_sensitivity);
++    WPT_identificationAlternativeSelfInductanceNanoHenry=WPT_estimateToU32(1000*WPT_complexEstimatorResult.alternative_l_uh);
++    WPT_identificationAlternativeMutualInductanceNanoHenry=WPT_estimateToU32(1000*WPT_complexEstimatorResult.alternative_m_uh);
++    if(WPT_identificationSolverFlags & (WPTCE_BAD_INPUT|WPTCE_NO_SOLUTION)) return;
++    WPT_estimatedSelfInductanceNanoHenry=WPT_estimateToU32(1000*p[0]);
++    WPT_estimatedMutualInductanceNanoHenry=WPT_estimateToU32(1000*p[1]);
++    WPT_estimatedEquivalentAcLoadMilliOhm=WPT_estimateToU32(1000*p[2]);
++    WPT_estimatedEquivalentAcReactanceMilliOhm=WPT_estimateToI32(1000*p[3]);
++    WPT_estimatedThirdAcResistanceMilliOhm=WPT_estimateToI32(1000*p[4]);
++    WPT_estimatedThirdAcReactanceMilliOhm=WPT_estimateToI32(1000*p[5]);
++    if(p[0]>0) WPT_estimatedCouplingPermille=(uint16_t)WPT_estimateToU32(1000*p[1]/p[0]);
++    if(WPT_identificationResidualMilliOhm>WPT_IDENT_MAX_IMPEDANCE_RESIDUAL_MOHM)
++        WPT_identificationSolverFlags|=WPTCE_HIGH_RESIDUAL;
++    WPT_identificationValid=(WPT_identificationSolverFlags==0U)?1U:0U;
++    // DC sentinel and DcLoadValid=0 remain untouched. Never use the sentinel
++    // in arithmetic. Read all published quantities only when their valid flag
++    // permits it; numerical validity does not establish physical accuracy.
++}
++/* END WPT COMPLEX ESTIMATOR INTEGRATION */
+ 
+ /*
+  * WPT_analyzeCurrentCapture

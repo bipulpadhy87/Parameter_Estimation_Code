@@ -2,15 +2,6 @@
 
 Revision: 2026-09-26
 
-## Install in the existing CCS project
-
-Back up the working project. Replace `psfbpcmc_main.c` and
-`psfbpcmc_user_settings.h` with the files in this package. Add
-`wpt_complex_estimator.h` beside them, in the project's include path. The new
-solver is header-only; do not add another solver `.c` file. Keep the project's
-existing `psfbpcmc.h`, HAL, device support, linker command files and libraries.
-This package is an update to that project, not a complete standalone firmware.
-
 **Before enabling identification, set the actual installed primary and
 secondary compensation capacitances.** Both remain `0UL` by default, as in the
 supplied firmware; zero capacitance intentionally prevents a valid result.

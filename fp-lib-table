@@ -1,0 +1,5 @@
+(fp_lib_table
+  (version 7)
+  (lib (name "Library")(type "KiCad")(uri "C:/Users/vihas/Box/Power Electronics and Magnetics Group/Yihao Wu/WPT pad/WPT NEW PAD - Vihas/WPTFootprints/Library.pretty")(options "")(descr ""))
+  (lib (name "FCR7350R")(type "KiCad")(uri "${KIPRJMOD}/FCR7350R/footprints.pretty")(options "")(descr ""))
+)
